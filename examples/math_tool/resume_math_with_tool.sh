@@ -1,4 +1,12 @@
+#!/bin/bash
 set -x
+
+# ============== Resume Training Script ==============
+# This script resumes training from the latest checkpoint
+# Usage: 
+#   ./resume_math_with_tool.sh                    # Resume from latest
+#   ./resume_math_with_tool.sh global_step_400    # Resume from specific step
+# ====================================================
 
 # Wandb API Key
 export WANDB_API_KEY=0bf200379ea117dd7541973d7025d5e7b93ed93a
@@ -12,27 +20,49 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 # ============== Configuration Variables ==============
 policy_path=Qwen/Qwen2.5-Math-1.5B-Instruct
 
-rollout_batch_size=64   # Reduced to save memory
-n_samples_per_prompts=8  # Reduced from 16 to save GPU memory
+rollout_batch_size=64
+n_samples_per_prompts=8
 total_epochs=300
 temperature=1.0
-ppo_mini_batch_size=64  # 64 * 8 / 4 = 128 (total_samples / num_ppo_updates)
+ppo_mini_batch_size=64
 lr=1e-6
 kl_loss_coef=0.0
 kl_coef=0.0
 entropy_coeff=0
-max_prompt_length=1200  # torl_math has prompts up to ~1050 tokens
-max_gen_length=2800     # Reduced to keep total under 4096
+max_prompt_length=1200
+max_gen_length=2800
 max_steps=2
-max_ckpt_to_keep=5      # Maximum number of checkpoints to keep
+max_ckpt_to_keep=5  # Maximum number of checkpoints to keep (saves disk space)
 
 dataset_name=torl_math
 run_name=rl.grpo_qwen.math.1.5b_${dataset_name}_maxsteps${max_steps}
 
-# Output directory for checkpoints (on shared FSx filesystem)
-output_dir=/fsx/zzsamshi/rllm/checkpoints/torl/${run_name}
+# Checkpoint directory
+checkpoint_dir=/fsx/zzsamshi/rllm/checkpoints/torl/${run_name}
 
 # =====================================================
+
+# Check if checkpoint directory exists
+if [ ! -d "$checkpoint_dir" ]; then
+    echo "Error: Checkpoint directory not found: $checkpoint_dir"
+    echo "Please run train_math_with_tool.sh first to create initial checkpoints."
+    exit 1
+fi
+
+# Show available checkpoints
+echo "Available checkpoints in $checkpoint_dir:"
+ls -d ${checkpoint_dir}/global_step_* 2>/dev/null | sort -t_ -k3 -n
+
+# Get latest checkpoint
+if [ -f "${checkpoint_dir}/latest_checkpointed_iteration.txt" ]; then
+    latest_step=$(cat ${checkpoint_dir}/latest_checkpointed_iteration.txt)
+    echo ""
+    echo "Latest checkpoint: global_step_${latest_step}"
+fi
+
+echo ""
+echo "Resuming training with resume_mode=auto..."
+echo ""
 
 # Find the directory where rllm package is located
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
@@ -82,16 +112,16 @@ python3 -m examples.math_tool.train_math_with_tool \
     trainer.logger=['console','wandb'] \
     trainer.project_name='torl' \
     trainer.experiment_name=$run_name \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=200 \
-    trainer.test_freq=40 \
+    trainer.save_freq=50 \
+    trainer.test_freq=4 \
     trainer.resume_mode=auto \
     trainer.max_actor_ckpt_to_keep=$max_ckpt_to_keep \
     trainer.default_hdfs_dir=null \
-    trainer.default_local_dir=$output_dir \
     rllm.agent.max_steps=$max_steps \
     rllm.stepwise_advantage.enable=False \
     trainer.total_epochs=$total_epochs \
     trainer.log_episodes=True $@
+

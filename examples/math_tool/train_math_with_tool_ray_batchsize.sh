@@ -1,3 +1,4 @@
+#!/bin/bash
 set -x
 
 # Wandb API Key
@@ -10,35 +11,42 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
 # ============== Configuration Variables ==============
-policy_path=Qwen/Qwen2.5-Math-1.5B-Instruct
+policy_path=Qwen/Qwen2.5-Math-1.5B
 
-rollout_batch_size=64   # Reduced to save memory
-n_samples_per_prompts=8  # Reduced from 16 to save GPU memory
-total_epochs=300
+# Accept batch size as first argument, default to 128
+rollout_batch_size=${1:-128}
+# Accept rollout.n as second argument, default to 8
+n_samples_per_prompts=${2:-8}
+total_epochs=5
 temperature=1.0
-ppo_mini_batch_size=64  # 64 * 8 / 4 = 128 (total_samples / num_ppo_updates)
+ppo_mini_batch_size=64  # Fixed at 64 as requested
 lr=1e-6
 kl_loss_coef=0.0
 kl_coef=0.0
 entropy_coeff=0
-max_prompt_length=1200  # torl_math has prompts up to ~1050 tokens
-max_gen_length=2800     # Reduced to keep total under 4096
+max_prompt_length=1200
+max_gen_length=2800
 max_steps=2
-max_ckpt_to_keep=5      # Maximum number of checkpoints to keep
+max_ckpt_to_keep=5
 
 dataset_name=torl_math
-run_name=rl.grpo_qwen.math.1.5b_${dataset_name}_maxsteps${max_steps}
+# Extract model name for run_name (e.g., Qwen/Qwen2.5-Math-1.5B -> qwen2.5_math_1.5b)
+model_name=$(echo $policy_path | sed 's|Qwen/||' | sed 's|-|_|g' | tr '[:upper:]' '[:lower:]')
+run_name=rl.grpo_${model_name}_${dataset_name}_bs${rollout_batch_size}_n${n_samples_per_prompts}_kl${kl_loss_coef}_maxsteps${max_steps}
 
 # Output directory for checkpoints (on shared FSx filesystem)
 output_dir=/fsx/zzsamshi/rllm/checkpoints/torl/${run_name}
 
 # =====================================================
 
-# Find the directory where rllm package is located
-RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
+# Use the shared FSx path directly (not the container's /workspace/rllm)
+RLLM_DIR=/fsx/zzsamshi/rllm
 
 # Change to the RLLM directory so Python can find the examples module
 cd "$RLLM_DIR"
+
+# Add RLLM_DIR and verl to PYTHONPATH so examples and verl modules can be found
+export PYTHONPATH="${RLLM_DIR}:${RLLM_DIR}/verl:${PYTHONPATH}"
 
 python3 -m examples.math_tool.train_math_with_tool \
     algorithm.adv_estimator=grpo \
@@ -67,7 +75,7 @@ python3 -m examples.math_tool.train_math_with_tool \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.temperature=$temperature \
     actor_rollout_ref.rollout.top_p=1.0 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=$n_samples_per_prompts \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.max_num_seqs=256 \
@@ -85,8 +93,8 @@ python3 -m examples.math_tool.train_math_with_tool \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=200 \
-    trainer.test_freq=40 \
+    trainer.save_freq=100 \
+    trainer.test_freq=10 \
     trainer.resume_mode=auto \
     trainer.max_actor_ckpt_to_keep=$max_ckpt_to_keep \
     trainer.default_hdfs_dir=null \
@@ -94,4 +102,5 @@ python3 -m examples.math_tool.train_math_with_tool \
     rllm.agent.max_steps=$max_steps \
     rllm.stepwise_advantage.enable=False \
     trainer.total_epochs=$total_epochs \
-    trainer.log_episodes=True $@
+    trainer.log_episodes=True
+

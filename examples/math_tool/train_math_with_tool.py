@@ -9,8 +9,8 @@ from rllm.trainer.agent_trainer import AgentTrainer
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="agent_ppo_trainer", version_base=None)
 def main(config):
-    train_dataset = DatasetRegistry.load_dataset("deepscaler_math", "train")
-    test_dataset = DatasetRegistry.load_dataset("aime2024", "test")
+    train_dataset = DatasetRegistry.load_dataset("torl_math", "train")
+    test_dataset = DatasetRegistry.load_dataset("torl_math", "test")
 
     agent_args = {"tools": ["python"], "parser_name": "qwen", "system_prompt": "You are a math assistant that can write python to solve math problems."}
     env_args = {

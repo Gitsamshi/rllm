@@ -1,3 +1,4 @@
+#!/bin/bash
 set -x
 
 # Wandb API Key
@@ -12,11 +13,11 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 # ============== Configuration Variables ==============
 policy_path=Qwen/Qwen2.5-Math-1.5B-Instruct
 
-rollout_batch_size=64   # Reduced to save memory
+rollout_batch_size=128   # Reduced to save memory
 n_samples_per_prompts=8  # Reduced from 16 to save GPU memory
-total_epochs=300
+total_epochs=30
 temperature=1.0
-ppo_mini_batch_size=64  # 64 * 8 / 4 = 128 (total_samples / num_ppo_updates)
+ppo_mini_batch_size=128  # 64 * 8 / 4 = 128 (total_samples / num_ppo_updates)
 lr=1e-6
 kl_loss_coef=0.0
 kl_coef=0.0
@@ -34,11 +35,14 @@ output_dir=/fsx/zzsamshi/rllm/checkpoints/torl/${run_name}
 
 # =====================================================
 
-# Find the directory where rllm package is located
-RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
+# Use the shared FSx path directly (not the container's /workspace/rllm)
+RLLM_DIR=/fsx/zzsamshi/rllm
 
 # Change to the RLLM directory so Python can find the examples module
 cd "$RLLM_DIR"
+
+# Add RLLM_DIR and verl to PYTHONPATH so examples and verl modules can be found
+export PYTHONPATH="${RLLM_DIR}:${RLLM_DIR}/verl:${PYTHONPATH}"
 
 python3 -m examples.math_tool.train_math_with_tool \
     algorithm.adv_estimator=grpo \
@@ -95,3 +99,4 @@ python3 -m examples.math_tool.train_math_with_tool \
     rllm.stepwise_advantage.enable=False \
     trainer.total_epochs=$total_epochs \
     trainer.log_episodes=True $@
+
