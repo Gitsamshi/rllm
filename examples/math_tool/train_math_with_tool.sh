@@ -84,13 +84,8 @@ python3 -m examples.math_tool.train_math_with_tool \
     rllm.mask_truncated_samples=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-<<<<<<< Updated upstream
-    trainer.project_name='torl' \
-    trainer.experiment_name=$run_name \
-=======
     trainer.project_name='starter' \
     trainer.experiment_name='4b-math-tool-rollout-samples-vis-check' \
->>>>>>> Stashed changes
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
@@ -102,12 +97,7 @@ python3 -m examples.math_tool.train_math_with_tool \
     trainer.default_local_dir=$output_dir \
     rllm.agent.max_steps=$max_steps \
     rllm.stepwise_advantage.enable=False \
-<<<<<<< Updated upstream
-    trainer.total_epochs=$total_epochs \
-    trainer.log_episodes=True $@
-=======
     +trainer.log_rollout_samples=True \
     +trainer.rollout_log_freq=3 \
     +trainer.rollout_num_samples=10 \
     trainer.total_epochs=5
->>>>>>> Stashed changes
