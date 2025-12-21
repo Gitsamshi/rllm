@@ -136,6 +136,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        self.logger = logger  # Store logger as instance variable for use in other methods
 
         self.global_steps = 0
 
@@ -173,9 +174,12 @@ class AgentPPOTrainer(RayPPOTrainer):
 
                 with marked_timer("step", timing_raw):
                     self.init_envs_and_agents(batch)
+                    # DEBUG: Breakpoint before rollout stage - uncomment to debug
+                    # breakpoint()  # DEBUG: Before rollout, batch ready
 
                     if self.config.rllm.stepwise_advantage.enable:
-                        final_gen_batch_output = self.generate_agent_steps(timing_raw=timing_raw, meta_info=batch.meta_info, uids=batch.non_tensor_batch["uid"])
+                        final_gen_batch_output, generate_metrics = self.generate_agent_steps(timing_raw=timing_raw, meta_info=batch.meta_info, uids=batch.non_tensor_batch["uid"])
+                        metrics.update(generate_metrics)
                         repeat_counts = final_gen_batch_output.meta_info["repeat_counts"]
                         # need to repeat to make shape match
                         batch = batch.sample_level_repeat(repeat_counts)
@@ -187,6 +191,8 @@ class AgentPPOTrainer(RayPPOTrainer):
                         final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
                         batch = batch.union(final_gen_batch_output)
                         metrics.update(generate_metrics)
+                    # DEBUG: Breakpoint after rollout stage - uncomment to debug
+                    # breakpoint()  # DEBUG: After rollout, final_gen_batch_output available
 
                     # compute values
                     if self.use_critic:
@@ -474,7 +480,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             self.init_envs_and_agents(test_batch)
 
             if self.config.rllm.stepwise_advantage.enable:
-                test_output_gen_batch = self.generate_agent_steps(meta_info=test_batch.meta_info, uids=test_batch.non_tensor_batch["uid"])
+                test_output_gen_batch, _ = self.generate_agent_steps(meta_info=test_batch.meta_info, uids=test_batch.non_tensor_batch["uid"])
                 # for validation, we only need the last step
                 is_last_step = test_output_gen_batch.non_tensor_batch["is_last_step"]
                 last_step_indices = np.where(is_last_step == True)[0]
@@ -545,6 +551,8 @@ class AgentPPOTrainer(RayPPOTrainer):
             DataProto: Representation of the agent's trajectories.
             Dict[str:float]: Metrics for the generation process.
         """
+        # DEBUG: Breakpoint at rollout stage - uncomment to debug
+        # breakpoint()  # DEBUG: generate_agent_trajectory start
         if timing_raw is None:
             timing_raw = {}
         with marked_timer("collect_trajectory", timing_raw):
@@ -569,7 +577,7 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         Returns:
             DataProto: Representation of the last step of agent's trajectories.
-            Dict[str:List[DataProto]]: Index of the trajectory to the rest of the steps from the trajectory.
+            Dict[str, float]: Metrics for the generation process.
         """
         if timing_raw is None:
             timing_raw = {}
@@ -585,8 +593,76 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         with marked_timer("transform_trajectory", timing_raw):
             # Transform the raw trajectories into DataProto format.
-            final_gen_batch_output = self._transform_agent_steps(steps, uids=uids)
-        return final_gen_batch_output
+            final_gen_batch_output, metrics = self._transform_agent_steps(steps, uids=uids)
+        return final_gen_batch_output, metrics
+
+    def _log_rollout_samples_to_wandb(self, trajectories: list[dict], traj_scores: list, chat_completions: list, step: int, num_samples: int = 10):
+        """
+        Log rollout samples to tracking backends (e.g., wandb) as a table.
+
+        Args:
+            trajectories: List of trajectory dictionaries
+            traj_scores: List of trajectory rewards
+            chat_completions: List of chat completion dictionaries
+            step: Current training step
+            num_samples: Number of samples to log (default: 10)
+        """
+        if not hasattr(self, 'logger') or self.logger is None:
+            print(f"[ROLLOUT LOGGING] WARNING: Logger not initialized!")
+            return  # logger not initialized
+
+        print(f"[ROLLOUT LOGGING] Logger is initialized. Logger backends: {list(self.logger.logger.keys()) if hasattr(self.logger, 'logger') else 'unknown'}")
+
+        try:
+            # Sample trajectories to log
+            num_samples = min(num_samples, len(trajectories))
+            indices = np.random.choice(len(trajectories), num_samples, replace=False) if len(trajectories) > num_samples else range(len(trajectories))
+            
+            table_data = []
+            for idx in indices:
+                traj = trajectories[idx]
+                score = traj_scores[idx] if idx < len(traj_scores) else 0.0
+                chat_completion = chat_completions[idx] if idx < len(chat_completions) else {}
+                
+                # Extract prompt and response text
+                # Try to get from chat_completion first, otherwise decode from tokens
+                if chat_completion and isinstance(chat_completion, dict):
+                    # Try to extract from chat_completion structure
+                    prompt_text = str(chat_completion.get("prompt", ""))
+                    response_text = str(chat_completion.get("response", ""))
+                else:
+                    # Decode from tokens
+                    prompt_tokens = traj.get("prompt_tokens", torch.tensor([]))
+                    response_tokens = traj.get("response_tokens", torch.tensor([]))
+                    prompt_text = self.tokenizer.decode(prompt_tokens, skip_special_tokens=True) if prompt_tokens.numel() > 0 else ""
+                    response_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True) if response_tokens.numel() > 0 else ""
+                
+                table_data.append([prompt_text, response_text, float(score)])
+            
+            # Create table for wandb (if wandb is enabled)
+            if hasattr(self.logger, 'logger') and "wandb" in self.logger.logger:
+                print(f"[ROLLOUT LOGGING] Wandb is enabled, creating table with {len(table_data)} samples")
+                import wandb
+                rollout_table = wandb.Table(
+                    columns=["prompt", "response", "reward"],
+                    data=table_data
+                )
+                # Use logger instance to log, which supports multiple backends
+                self.logger.log(
+                    data={"rollout_samples": rollout_table},
+                    step=step,
+                    backend=["wandb"]  # Only log to wandb since Table is wandb-specific
+                )
+                print(f"[ROLLOUT LOGGING] Successfully logged rollout_samples table to wandb at step {step}")
+            else:
+                print(f"[ROLLOUT LOGGING] WARNING: Wandb is NOT in logger backends!")
+
+        except ImportError as e:
+            print(f"[ROLLOUT LOGGING] ERROR: wandb import failed: {e}")
+        except Exception as e:
+            print(f"[ROLLOUT LOGGING] ERROR: Failed to log rollout samples: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _transform_agent_trajectories(self, trajectories: list[dict]):
         """
@@ -706,6 +782,20 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         self.visualize_trajectory(DataProto.from_dict(tensors=tensor_batch))
 
+        # Log rollout samples to wandb if enabled
+        if hasattr(self, 'global_steps') and hasattr(self, 'config'):
+            if self.config.trainer.get('log_rollout_samples', False):
+                log_freq = self.config.trainer.get('rollout_log_freq', 5)  # Log every 5 steps by default
+                if self.global_steps % log_freq == 0:
+                    num_samples = self.config.trainer.get('rollout_num_samples', 10)
+                    self._log_rollout_samples_to_wandb(
+                        trajectories=trajectories,
+                        traj_scores=traj_scores,
+                        chat_completions=chat_completions,
+                        step=self.global_steps,
+                        num_samples=num_samples
+                    )
+
         return DataProto.from_dict(tensors=tensor_batch), metrics
 
     def visualize_trajectory(self, tensor_batch, sample_idx=0, max_samples=1, mask_key="response_mask"):
@@ -746,6 +836,8 @@ class AgentPPOTrainer(RayPPOTrainer):
             Any: Items generated by the `trajectory_generator`, typically
                  representing parts or results of agent trajectories in token format.
         """
+        # DEBUG: Breakpoint at async rollout - uncomment to debug
+        # breakpoint()  # DEBUG: generate_agent_trajectories_async start
         if timing_raw is None:
             timing_raw = {}
         queue = Queue()
@@ -780,6 +872,10 @@ class AgentPPOTrainer(RayPPOTrainer):
         all_mc_returns = []  # Monte Carlo returns for each episode
         # the last step will have reward assigned and be used for advantage calculation
 
+        # Collect data for logging
+        step_metrics = []
+        chat_completions = []
+
         for episode in steps:
             episode_steps = episode["steps"]
             idx = episode["idx"]
@@ -792,6 +888,12 @@ class AgentPPOTrainer(RayPPOTrainer):
             step_numbers.append(len(episode_steps) - 1)
             training_rewards.append(training_reward)
             all_mc_returns.extend(mc_returns)
+
+            # Collect metrics and chat completions if available
+            if "metrics" in episode:
+                step_metrics.append(episode["metrics"])
+            if "chat_completions" in episode:
+                chat_completions.append(episode["chat_completions"])
 
             all_steps_idx_list.extend([idx for _ in range(len(episode_steps))])
             all_steps_is_last_step_list.extend([False for _ in range(len(episode_steps))])
@@ -886,7 +988,59 @@ class AgentPPOTrainer(RayPPOTrainer):
             sample_indices = np.random.choice(last_step_indices, size=min(2, len(last_step_indices)), replace=False)
             for idx in sample_indices:
                 self.visualize_trajectory(result, sample_idx=idx, max_samples=1)
-        return result
+
+        # Aggregate step metrics for logging (similar to trajectory metrics)
+        metrics = {}
+        if step_metrics:
+            # Flatten step_metrics into a dict of lists
+            step_metrics_dict = {k: [d[k] for d in step_metrics if k in d] for k in step_metrics[0]} if step_metrics else {}
+            # Aggregate metrics (mean, min, max)
+            for k, v_list in step_metrics_dict.items():
+                v_list = [v for v in v_list if v is not None and v >= 0]
+                if not v_list:
+                    continue
+                v_list = np.array(v_list)
+                metrics.update(
+                    {
+                        f"step/{k}_mean": v_list.mean(),
+                        f"step/{k}_min": v_list.min(),
+                        f"step/{k}_max": v_list.max(),
+                    }
+                )
+
+        # Log rollout samples to wandb if enabled (for stepwise advantage mode)
+        if hasattr(self, 'global_steps') and hasattr(self, 'config'):
+            if self.config.trainer.get('log_rollout_samples', False):
+                log_freq = self.config.trainer.get('rollout_log_freq', 5)
+                if self.global_steps % log_freq == 0:
+                    print(f"[ROLLOUT LOGGING] Logging rollout samples at step {self.global_steps}")
+                    num_samples = self.config.trainer.get('rollout_num_samples', 10)
+                    # Convert steps data to trajectory format for logging
+                    trajectories_for_logging = []
+                    for episode in steps:
+                        # Get the last step from each episode for logging
+                        last_step = episode["steps"][-1] if episode["steps"] else None
+                        if last_step:
+                            trajectories_for_logging.append({
+                                "prompt_tokens": torch.tensor(self.tokenizer.encode(last_step["prompt"], add_special_tokens=False), dtype=torch.long),
+                                "response_tokens": torch.tensor(self.tokenizer.encode(last_step["response"], add_special_tokens=False), dtype=torch.long),
+                                "response_masks": torch.ones(1),  # placeholder
+                            })
+
+                    print(f"[ROLLOUT LOGGING] Prepared {len(trajectories_for_logging)} trajectories for logging")
+                    self._log_rollout_samples_to_wandb(
+                        trajectories=trajectories_for_logging,
+                        traj_scores=training_rewards,
+                        chat_completions=chat_completions,
+                        step=self.global_steps,
+                        num_samples=num_samples
+                    )
+                    print(f"[ROLLOUT LOGGING] Finished logging rollout samples")
+            else:
+                if self.global_steps % 10 == 0:  # Print every 10 steps to avoid spam
+                    print(f"[ROLLOUT LOGGING] Rollout logging is DISABLED. Set trainer.log_rollout_samples=True to enable.")
+
+        return result, metrics
 
     def _stepwise_advantage_broadcast(self, last_step_batch, other_step_batch):
         """

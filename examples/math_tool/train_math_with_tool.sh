@@ -8,6 +8,7 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
+# export RAY_DEBUG_POST_MORTEM=1
 
 # ============== Configuration Variables ==============
 policy_path=Qwen/Qwen2.5-Math-1.5B-Instruct
@@ -36,6 +37,9 @@ output_dir=/fsx/zzsamshi/rllm/checkpoints/torl/${run_name}
 
 # Find the directory where rllm package is located
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
+export PYTHONPATH="${RLLM_DIR}:${RLLM_DIR}/verl:${PYTHONPATH}"
+export WANDB_API_KEY=47ebf527922cfbd4913616af0e8fff7b3aed5fc3
+
 
 # Change to the RLLM directory so Python can find the examples module
 cd "$RLLM_DIR"
@@ -80,8 +84,13 @@ python3 -m examples.math_tool.train_math_with_tool \
     rllm.mask_truncated_samples=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
+<<<<<<< Updated upstream
     trainer.project_name='torl' \
     trainer.experiment_name=$run_name \
+=======
+    trainer.project_name='starter' \
+    trainer.experiment_name='4b-math-tool-rollout-samples-vis-check' \
+>>>>>>> Stashed changes
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
@@ -93,5 +102,12 @@ python3 -m examples.math_tool.train_math_with_tool \
     trainer.default_local_dir=$output_dir \
     rllm.agent.max_steps=$max_steps \
     rllm.stepwise_advantage.enable=False \
+<<<<<<< Updated upstream
     trainer.total_epochs=$total_epochs \
     trainer.log_episodes=True $@
+=======
+    +trainer.log_rollout_samples=True \
+    +trainer.rollout_log_freq=3 \
+    +trainer.rollout_num_samples=10 \
+    trainer.total_epochs=5
+>>>>>>> Stashed changes
